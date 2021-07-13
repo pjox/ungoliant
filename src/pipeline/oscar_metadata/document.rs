@@ -14,11 +14,14 @@
 //!  
 use crate::error::Error;
 use crate::pipeline::oscar_metadata::chunks;
-use crate::pipeline::oscar_metadata::metadata::Metadata;
+use crate::pipeline::Metadata;
+// use crate::pipeline::oscar_metadata::metadata::Metadata;
+// use log::warn;
 use log::warn;
 use std::collections::HashMap;
 use std::convert::TryFrom;
-use std::string::FromUtf8Error;
+// use std::convert::TryFrom;
+// use std::string::FromUtf8Error;
 use warc::header::WarcHeader;
 
 /// represents a whole docuement, that is:
@@ -44,12 +47,12 @@ struct Piece {
 }
 
 /// Holds a merged-down version of Piece, where sentences are merged into a single String
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MergedPiece {
-    headers: HashMap<WarcHeader, Vec<u8>>,
-    sentences: String,
-    nb_sentences: usize,
-    identification: &'static str,
+    pub headers: HashMap<WarcHeader, Vec<u8>>,
+    pub sentences: String,
+    pub nb_sentences: usize,
+    pub identification: &'static str,
 }
 
 impl MergedPiece {
@@ -99,22 +102,31 @@ pub struct PartChunk {
 }
 
 impl PartChunk {
-    pub fn new(merged_pieces: Vec<MergedPiece>) -> Result<Self, FromUtf8Error> {
+    /// Create a new PartChunk.
+    /// Note that the same language constraint is not checked.
+    /// It must be done before creating a PartChunk.
+    pub fn new(merged_pieces: Vec<MergedPiece>) -> Result<Self, Error> {
         let mut metadata = Vec::new();
         let mut body = String::new();
 
         let mut cur_offset = 0;
-        for piece in merged_pieces {
+        let merged_pieces_len = merged_pieces.len();
+        for (idx, piece) in merged_pieces.into_iter().enumerate() {
             //build metadata
             let mut m = Metadata::try_from(piece.headers)?;
             m.offset = cur_offset;
             m.nb_sentences = piece.nb_sentences;
 
             body += &piece.sentences;
-            body += "\n\n";
 
-            // bump 1 to account for newline
-            cur_offset += m.nb_sentences + 1;
+            // only add newline between paragraphs,
+            // don't add one at the end of the partchunk.
+            if idx < merged_pieces_len - 1 {
+                body += "\n\n";
+
+                // bump 1 to account for newline
+                cur_offset += m.nb_sentences + 1;
+            }
 
             metadata.push(m);
         }
@@ -125,6 +137,7 @@ impl PartChunk {
     /// updates offsets.
     ///
     /// This offsets the metadata's `offset` fields by the provided `offset` value.
+    /// Returns the offset to use for future writes
     pub fn bump_offsets(&mut self, offset: usize) -> Option<usize> {
         self.metadata.iter_mut().for_each(|m| m.offset += offset);
         match self.metadata.last() {
@@ -376,29 +389,29 @@ mod tests {
         println!("{:#?}", docs_merged);
     }
 
-    #[test]
-    fn merge_to_partschunks() {
-        let mut hm: HashMap<&'static str, Vec<MergedPiece>> = HashMap::new();
-        let docs = gen_records();
-        let docs_merged = docs
-            .into_iter()
-            .map(|doc| doc.into_merged_pieces_lang())
-            .flatten()
-            .collect::<Vec<MergedPiece>>();
+    // #[test]
+    // fn merge_to_partschunks() {
+    //     let mut hm: HashMap<&'static str, Vec<MergedPiece>> = HashMap::new();
+    //     let docs = gen_records();
+    //     let docs_merged = docs
+    //         .into_iter()
+    //         .map(|doc| doc.into_merged_pieces_lang())
+    //         .flatten()
+    //         .collect::<Vec<MergedPiece>>();
 
-        for piece in docs_merged {
-            let e = hm.entry(piece.identification).or_insert(Vec::new());
-            e.push(piece);
-        }
-        // println!("{:#?}", hm);
+    //     for piece in docs_merged {
+    //         let e = hm.entry(piece.identification).or_insert(Vec::new());
+    //         e.push(piece);
+    //     }
+    //     // println!("{:#?}", hm);
 
-        for (lang, pieces) in hm {
-            let pc = PartChunk::new(pieces).unwrap();
-            println!("{:#?}", pc.metadata);
-            println!(
-                "{:#?}",
-                pc.body.lines().enumerate().collect::<Vec<(usize, &str)>>()
-            );
-        }
-    }
+    //     for (lang, pieces) in hm {
+    //         let pc = PartChunk::new(pieces).unwrap();
+    //         println!("{:#?}", pc.metadata);
+    //         println!(
+    //             "{:#?}",
+    //             pc.body.lines().enumerate().collect::<Vec<(usize, &str)>>()
+    //         );
+    //     }
+    // }
 }

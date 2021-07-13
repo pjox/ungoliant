@@ -41,6 +41,7 @@ mod error;
 mod lang;
 mod pipeline;
 mod shard;
+mod writing;
 
 #[tokio::main]
 async fn main() -> Result<(), error::Error> {
@@ -73,7 +74,7 @@ async fn main() -> Result<(), error::Error> {
         }
 
         cli::Ungoliant::Pipeline(p) => {
-            let p = pipeline::OscarMetadata::new(p.src, p.dst, p.lid_path);
+            let p = pipeline::OscarMetadata::new(p.src, p.dst, p.lid_path, p.part_size);
             p.run()?;
         }
     };

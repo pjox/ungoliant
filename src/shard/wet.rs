@@ -68,7 +68,7 @@ mod tests {
     #[test]
     #[ignore]
     fn test_init() {
-        let shard = Wet::from_path_gzip("results/0.txt.gz").unwrap();
+        let _ = Wet::from_path_gzip("results/0.txt.gz").unwrap();
     }
 
     #[test]
@@ -81,7 +81,6 @@ mod tests {
         // See https://iipc.github.io/warc-specifications/specifications/warc-format/warc-1.1/#named-fields
         // for a better explanation of fields
         let shard = Wet::from_path_gzip("results/0.txt.gz").unwrap();
-        let lang_token = WarcHeader::Unknown("warc-identified-content-language".to_string());
 
         for (idx, record) in shard.enumerate().skip(1).take(4) {
             let record = record.unwrap();

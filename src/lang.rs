@@ -4,12 +4,12 @@
 //! and language metadata.
 //!
 use std::{
-    collections::{hash_map::ValuesMut, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     fs::{File, OpenOptions},
     path::{Path, PathBuf},
 };
 
-use log::debug;
+use log::{debug, warn};
 use structopt::lazy_static::lazy_static;
 
 lazy_static! {
@@ -216,7 +216,12 @@ pub struct LangFiles {
 
 impl LangFiles {
     /// open a file handle for each language
+    #[deprecated(
+        since = "0.1.0",
+        note = "Please use the crate::writing::LangFiles structure instead"
+    )]
     pub fn new(src: &Path) -> Result<Self, std::io::Error> {
+        warn!("Deprecated in favor of crate::writing::LangFiles!");
         let mut options = OpenOptions::new();
         options.read(true).append(true).create(true);
         let mut handles = HashMap::new();
@@ -231,31 +236,8 @@ impl LangFiles {
         Ok(LangFiles { handles })
     }
 
-    /// open a file handle for each language metadata array
-    pub fn new_meta(src: &Path) -> Result<Self, std::io::Error> {
-        let mut options = OpenOptions::new();
-        options.read(true).write(true).create(true);
-        let mut handles = HashMap::new();
-        for lang in LANG.iter() {
-            let mut filename = lang.to_string();
-            filename.push_str("_meta");
-            let mut file_path: PathBuf = [src, &Path::new(&filename)].iter().collect();
-            file_path.set_extension("json");
-            debug!("creating/opening {:?}", file_path);
-            let fh = options.clone().open(file_path)?;
-            handles.insert(*lang, fh);
-        }
-
-        Ok(LangFiles { handles })
-    }
-
     /// binds to [HashMap::get].
     pub fn get(&self, key: &'static str) -> Option<&File> {
         self.handles.get(key)
-    }
-
-    /// binds to [HashMap::values_mut]
-    pub fn values_mut(&mut self) -> ValuesMut<&'static str, File> {
-        self.handles.values_mut()
     }
 }

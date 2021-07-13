@@ -1,21 +1,15 @@
-use std::{
-    collections::HashMap,
-    io::{Read, Seek, SeekFrom, Write},
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashMap, path::PathBuf};
 
 use crate::lang::LANG;
-use crate::pipeline::oscar_metadata::Metadata;
 use crate::shard::wet::Wet;
 use crate::{classify::Classifier, pipeline::oscar_metadata::document::MergedPiece};
 use crate::{error::Error, pipeline::oscar_metadata::document::Document};
-use crate::{lang::LangFiles, pipeline::oscar_metadata::document::PartChunk};
 use log::Level::Debug;
 use log::{debug, error, info, log_enabled, warn};
 use rayon::prelude::*;
 use warc::{header::WarcHeader, RawRecord};
 
+use crate::writing::LangFiles;
 /// OSCAR v1.5 generation pipeline
 ///
 /// OSCAR v1.5 is a retrocompatible corpus
@@ -39,14 +33,20 @@ pub struct OscarMetadata {
     src: PathBuf,
     dst: PathBuf,
     lid_path: PathBuf,
+    part_size: u64,
 }
 
 /// convinience type alias for [warc::Record] headers.
 type WarcHeaders = HashMap<WarcHeader, Vec<u8>>;
 
 impl OscarMetadata {
-    pub fn new(src: PathBuf, dst: PathBuf, lid_path: PathBuf) -> Self {
-        Self { src, dst, lid_path }
+    pub fn new(src: PathBuf, dst: PathBuf, lid_path: PathBuf, part_size: u64) -> Self {
+        Self {
+            src,
+            dst,
+            lid_path,
+            part_size,
+        }
     }
 
     /// attempt to predict language on provided sentence.
@@ -156,17 +156,7 @@ impl OscarMetadata {
         let results = results.enumerate().par_bridge();
 
         // holds file handles
-        let langfiles = LangFiles::new(&self.dst)?;
-        let mut metafiles = LangFiles::new_meta(&self.dst)?;
-
-        //corpus-scoped line offsets
-        let offsets_global: Arc<Mutex<HashMap<&'static str, usize>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-
-        // put json array starting token
-        for metafile in metafiles.values_mut() {
-            metafile.write_all(b"[")?;
-        }
+        let langfiles = LangFiles::new(&self.dst, self.part_size * 1_000_000)?;
 
         // iterate over shards
         let r: Vec<Error> = results
@@ -237,163 +227,24 @@ impl OscarMetadata {
                     e.push(piece);
                 }
 
-                // create a partchunk for each lang
-                // that means concatenating pieces
-                // creating metadata
-                // bumping offsets
-                //
-                // we get a HashMap that points each language to a partchunk
-                let mut chunk_parts: HashMap<&'static str, PartChunk> = lang_pieces
-                    .into_iter()
-                    .filter_map(|(lang, pieces)| {
-                        let pc = PartChunk::new(pieces);
-                        match pc {
-                            Ok(pc) => Some((lang, pc)),
-                            Err(e) => {
-                                warn!("{:?}", e);
-                                None
-                            }
-                        }
-                    })
-                    .collect();
+                // write concurrently
+                lang_pieces.into_par_iter().for_each(|(lang, pieces)| {
+                    let writer = langfiles.writers().get(lang).unwrap();
+                    let mut writer_lock = writer.lock().unwrap();
+                    writer_lock.write(pieces).unwrap();
+                });
 
-                // scope to lock mutex
-                {
-                    let offsets_global_arc = offsets_global.clone();
-                    let mut offsets_global_mutex = offsets_global_arc.lock().unwrap();
-
-                    // update metadata with global offsets
-                    // TODO: flatten shard_results into a vec of records?
-                    for (lang, cp) in &mut chunk_parts {
-                        let offset = offsets_global_mutex.entry(lang).or_insert(0);
-                        let new_offset = cp.bump_offsets(*offset);
-                        match new_offset {
-                            Some(o) => *offset = o,
-                            None => warn!("problem with chunk part!"),
-                        }
-                    }
-
-                    debug!(
-                        " offset at end of shard {}: {:?}",
-                        idx,
-                        offsets_global_mutex.get("fr")
-                    );
-
-                    for (l, p) in chunk_parts {
-                        if let Err(e) = Self::write_sentences(&langfiles, l, p.body) {
-                            error!("could not write sentences. {} (shard {}): {:?}", l, idx, e);
-                        }
-
-                        if let Err(e) = Self::write_metadata(&metafiles, l, p.metadata, true) {
-                            error!("could not write metadata. {} (shard {}): {:?}", l, idx, e);
-                        }
-                    }
-                }
                 None
-                //mutex drop due to end of scope
             })
             .collect();
 
-        // put json array end token
         // fix trailing comma
-        // TODO: Either change the way the comma is added (special case for first iteratoin)
-        //       or derive Serialize and enable use of serialize_seq.
-        for error in Self::end_json(&mut metafiles).iter().filter(|x| x.is_err()) {
-            error!("error while ending/fixing JSON file: {:?}", error);
-        }
+        langfiles.close_meta()?;
 
         for err in r {
             error!("{:?}", err);
         }
 
         Ok(())
-    }
-
-    /// writes sentences into language file
-    fn write_sentences(
-        langfiles: &LangFiles,
-        lang: &'static str,
-        body: String,
-    ) -> Result<(), Error> {
-        let mut fd = langfiles
-            .get(lang)
-            .ok_or_else(|| Error::UnknownLang(lang.to_string()))?;
-        let stw = body.as_bytes();
-
-        fd.write_all(stw)?;
-        Ok(())
-    }
-
-    /// writes metadata into metadata language file
-    fn write_metadata(
-        metafiles: &LangFiles,
-        lang: &'static str,
-        metadata: Vec<Metadata>,
-        pretty: bool,
-    ) -> Result<(), Error> {
-        let mut fd_meta = metafiles
-            .get(lang)
-            .ok_or_else(|| Error::UnknownLang(lang.to_string()))?;
-
-        let mtw = metadata.iter().fold(String::new(), |acc, x| {
-            // attempt to serialize metadata
-            // match serde_json::to_string_pretty(x) {
-            let ser = if pretty {
-                serde_json::to_string_pretty(x)
-            } else {
-                serde_json::to_string(x)
-            };
-            match ser {
-                Ok(serialized) => acc + &serialized + ",",
-                Err(e) => {
-                    error!(
-                        "could not serialize metadata: {:?}\n{:?}",
-                        x.headers.get(&WarcHeader::RecordID),
-                        e
-                    );
-
-                    acc
-                }
-            }
-        });
-
-        fd_meta.write_all(mtw.as_bytes())?;
-
-        Ok(())
-    }
-
-    /// Ends json arrays for each metadata files
-    /// and fixes trailing comma to comply
-    /// with JSON standard
-    fn end_json(metafiles: &mut LangFiles) -> Vec<std::io::Result<()>> {
-        let mut results = Vec::new();
-
-        let mut buf = [0];
-        let comma = b",";
-
-        // convinience function that corrects the trailing comma
-        #[inline]
-        fn fix(meta_file: &mut std::fs::File, buf: &mut [u8], comma: &[u8]) -> std::io::Result<()> {
-            meta_file.seek(SeekFrom::Current(-1))?;
-            meta_file.read_exact(buf)?;
-            if buf == comma {
-                //rewind after read
-                meta_file.seek(SeekFrom::Current(-1))?;
-                //write null byte
-                meta_file.write_all(b"")?;
-            }
-            Ok(())
-        }
-
-        for meta_file in metafiles.values_mut() {
-            // get a character before the end
-            // and check if it is the offending comma
-            results.push(fix(meta_file, &mut buf, comma));
-
-            // put json array end token
-            results.push(meta_file.write_all(b"]"));
-        }
-
-        results
     }
 }

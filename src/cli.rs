@@ -71,8 +71,16 @@ pub struct Pipeline {
     pub dst: PathBuf,
     #[structopt(
         parse(from_os_str),
+        long = "lid-path",
         help = "Path to 176.lid.bin",
         default_value = "lid.176.bin"
     )]
     pub lid_path: PathBuf,
+    #[structopt(
+        short = "s",
+        long = "part_size",
+        help = "maximum part size in MBytes",
+        default_value = "500"
+    )]
+    pub part_size: u64,
 }
